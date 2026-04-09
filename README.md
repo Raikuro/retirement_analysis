@@ -19,6 +19,31 @@ Install dependencies with:
 pip install pandas numpy matplotlib seaborn python-dateutil
 ```
 
+## Docker Usage
+To run the analysis in a Docker container:
+
+1. Build the image once:
+```bash
+docker-compose build
+```
+
+2. Run the analysis (inputs and config are editable without rebuilding):
+```bash
+docker-compose up
+```
+
+Or with Docker directly:
+```bash
+docker build -t retirement-analysis .
+docker run -v $(pwd)/../input:/app/input \
+           -v $(pwd)/retirement_config.json:/app/retirement_analysis/retirement_config.json \
+           -v $(pwd)/output:/app/retirement_analysis/output \
+           -v $(pwd)/temp:/app/retirement_analysis/temp \
+           retirement-analysis
+```
+
+Results will be available in the `output/` directory. You can edit `../input/` files and `retirement_config.json` on your host and re-run without rebuilding.
+
 ## Basic usage
 1. Run the full backtest:
 ```bash

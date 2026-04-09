@@ -226,11 +226,9 @@ def write_path_rows(path_file, task_index, start_date, allocation, withdrawal_ra
 
 
 def worker_simulation(task):
-    task_index, start_date, allocation, withdrawal_rate = task
-    start_idx = np.searchsorted(fecha_array, start_date)
-    if start_idx >= len(fecha_array) or fecha_array[start_idx] != start_date:
-        return []
-
+    task_index, start_date_idx, allocation, withdrawal_rate = task
+    start_idx = start_date_idx
+    start_date = pd.Timestamp(fecha_array[start_idx])
     available_months = len(fecha_array) - start_idx
 
     # Validate that we have at least the minimum period
@@ -304,7 +302,7 @@ if __name__ == '__main__':
 
     # Prepare tasks and run the pool
     all_results = []
-    pool_tasks = [(i, sd, alloc, wr) for i, (sd, alloc, wr) in enumerate((sd, alloc, wr) for sd in start_dates for alloc in ALLOCATIONS for wr in WITHDRAWAL_RATES)]
+    pool_tasks = [(i, idx, alloc, wr) for i, (idx, alloc, wr) in enumerate((idx, alloc, wr) for idx in range(len(start_dates)) for alloc in ALLOCATIONS for wr in WITHDRAWAL_RATES)]
     processed = 0
     start_time = time.time()
     max_workers = max(1, cpu_count() - 1)
