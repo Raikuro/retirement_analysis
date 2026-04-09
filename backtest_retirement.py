@@ -4,11 +4,11 @@ import pandas as pd
 import numpy as np
 from dateutil.relativedelta import relativedelta
 import time
-from multiprocessing import Pool, cpu_count
+from multiprocessing import Pool, cpu_count, Lock
 import json
 import sys
 
-from db import DatabaseBackend, database_extension
+from db import DatabaseBackend, create_central_database
 
 # Load configuration
 with open(os.path.join(os.path.dirname(__file__), 'retirement_config.json'), 'r') as f:
@@ -23,10 +23,11 @@ FINAL_VALUE_TARGETS = config['FINAL_VALUE_TARGETS']
 
 # Write a complete monthly path for every execution
 SAVE_ALL_PATHS = config['SAVE_ALL_PATHS']
-DB_TYPE = config.get('DB_TYPE', None)
-DB_FILE = config.get('DB_FILE', 'backtest_retirement.duckdb')
-TEMP_DIR = os.path.join(os.path.dirname(__file__), config['TEMP_DIR'])
+DATA_START = config['DATA_START']
+DATA_END = config['DATA_END']
 WORKER_DB_CONN = None
+CENTRAL_DB_LOCK = None  # Shared lock for database access
+CENTRAL_DB_PATH = None  # Path to central database
 
 
 def quote_path(path):
@@ -42,54 +43,13 @@ def format_date(date):
         return pd.Timestamp(date).strftime('%Y-%m-%d')
 
 
-def init_worker(temp_dir, db_type, worker_extension):
-    global WORKER_DB_CONN
-    os.makedirs(temp_dir, exist_ok=True)
-    worker_db_path = os.path.join(temp_dir, f'worker_{os.getpid()}{worker_extension}')
-    if os.path.exists(worker_db_path):
-        os.remove(worker_db_path)
-    WORKER_DB_CONN = DatabaseBackend.open(worker_db_path, db_type=db_type)
+def init_worker_shared(central_db_path, db_type, lock):
+    """Initialize worker to use shared central database."""
+    global WORKER_DB_CONN, CENTRAL_DB_LOCK, CENTRAL_DB_PATH
+    WORKER_DB_CONN = DatabaseBackend.open(central_db_path, db_type=db_type)
     WORKER_DB_CONN.configure_worker()
-    WORKER_DB_CONN.create_tables(SAVE_ALL_PATHS)
-
-
-def prepare_temp_dir(temp_dir):
-    if os.path.exists(temp_dir):
-        for filename in os.listdir(temp_dir):
-            file_path = os.path.join(temp_dir, filename)
-            if os.path.isfile(file_path):
-                os.remove(file_path)
-            elif os.path.isdir(file_path):
-                shutil.rmtree(file_path)
-    else:
-        os.makedirs(temp_dir, exist_ok=True)
-    return temp_dir
-
-
-def merge_temp_databases(output_dir, db_file, temp_dir, save_all_paths, db_type):
-    final_db_path = os.path.join(output_dir, db_file)
-    if os.path.exists(final_db_path):
-        os.remove(final_db_path)
-
-    os.makedirs(output_dir, exist_ok=True)
-    conn = DatabaseBackend.open(final_db_path, db_type=db_type)
-    conn.create_tables(save_all_paths)
-
-    worker_files = sorted(
-        [os.path.join(temp_dir, f) for f in os.listdir(temp_dir) if f.endswith(database_extension(db_file))]
-    )
-    print(f"Merging {len(worker_files)} worker databases...", flush=True)
-    for idx, worker_file in enumerate(worker_files, start=1):
-        attach_name = f'worker_{idx-1}'
-        conn.attach(attach_name, worker_file)
-        conn.execute(f"INSERT INTO simulation_results SELECT * FROM {attach_name}.simulation_results")
-        if save_all_paths:
-            conn.execute(f"INSERT INTO simulation_paths SELECT * FROM {attach_name}.simulation_paths")
-        conn.detach(attach_name)
-        print(f"  Merged worker {idx}/{len(worker_files)}", flush=True)
-
-    conn.close()
-    return final_db_path
+    CENTRAL_DB_LOCK = lock
+    CENTRAL_DB_PATH = central_db_path
 
 
 def create_indexes(db_path, save_all_paths, db_type):
@@ -136,11 +96,20 @@ def load_data():
 # Load data
 data = load_data()
 
+# Parse target dates from config
+data_end = pd.to_datetime(DATA_END)
+data_start = pd.to_datetime(DATA_START)
 
-# Adjust to match the study: Feb 1871 - Dec 2016
-# Dynamically calculate the maximum date based on the period
-data_end = pd.to_datetime('2016-12-01')
-data_start = pd.to_datetime('1871-02-01')
+# Validate that target dates exist in the data
+data_date_range = (data['Fecha'].min(), data['Fecha'].max())
+if data_start < data_date_range[0] or data_start > data_date_range[1]:
+    raise ValueError(f"DATA_START '{DATA_START}' is outside data range ({data_date_range[0].strftime('%Y-%m-%d')} to {data_date_range[1].strftime('%Y-%m-%d')})")
+
+if data_end < data_date_range[0] or data_end > data_date_range[1]:
+    raise ValueError(f"DATA_END '{DATA_END}' is outside data range ({data_date_range[0].strftime('%Y-%m-%d')} to {data_date_range[1].strftime('%Y-%m-%d')})")
+
+if data_start >= data_end:
+    raise ValueError(f"DATA_START ({DATA_START}) must be before DATA_END ({DATA_END})")
 
 # Generate all possible start dates for the minimum period
 min_period = min(RETIREMENT_PERIODS)
@@ -258,15 +227,16 @@ def insert_path_rows(start_date, allocation, withdrawal_rate, path_data):
              float(path_data['max_values'][month_index - 1]))
         )
 
-    if rows:
-        WORKER_DB_CONN.execute('BEGIN TRANSACTION')
-        WORKER_DB_CONN.executemany(
-            '''INSERT INTO simulation_paths
-               (start_date, allocation, withdrawal_rate, month, date, sp500, bonds, total, withdrawal, min_value, max_value)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-            rows
-        )
-        WORKER_DB_CONN.execute('COMMIT')
+    if rows and CENTRAL_DB_LOCK is not None:
+        with CENTRAL_DB_LOCK:
+            WORKER_DB_CONN.execute('BEGIN TRANSACTION')
+            WORKER_DB_CONN.executemany(
+                '''INSERT INTO simulation_paths
+                   (start_date, allocation, withdrawal_rate, month, date, sp500, bonds, total, withdrawal, min_value, max_value)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                rows
+            )
+            WORKER_DB_CONN.execute('COMMIT')
 
 
 def insert_simulation_results(result_records):
@@ -291,16 +261,18 @@ def insert_simulation_results(result_records):
              float(record['total_withdrawn']))
         )
 
-    WORKER_DB_CONN.execute('BEGIN TRANSACTION')
-    WORKER_DB_CONN.executemany(
-        '''INSERT INTO simulation_results
-           (start_date, end_date, allocation, withdrawal_rate, retirement_period,
-            final_value_target, final_value, success, months_lasted, years_lasted,
-            min_value, max_value, total_withdrawn)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-        rows
-    )
-    WORKER_DB_CONN.execute('COMMIT')
+    if CENTRAL_DB_LOCK is not None:
+        with CENTRAL_DB_LOCK:
+            WORKER_DB_CONN.execute('BEGIN TRANSACTION')
+            WORKER_DB_CONN.executemany(
+                '''INSERT INTO simulation_results
+                   (start_date, end_date, allocation, withdrawal_rate, retirement_period,
+                    final_value_target, final_value, success, months_lasted, years_lasted,
+                    min_value, max_value, total_withdrawn)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                rows
+            )
+            WORKER_DB_CONN.execute('COMMIT')
 
 
 def worker_simulation(task):
@@ -388,14 +360,19 @@ if __name__ == '__main__':
 
     output_dir = os.path.join(os.path.dirname(__file__), 'output')
     os.makedirs(output_dir, exist_ok=True)
-    prepare_temp_dir(TEMP_DIR)
-    worker_extension = database_extension(DB_FILE)
+    
+    # Create central database using abstraction
+    central_db_path, _ = create_central_database(output_dir, SAVE_ALL_PATHS)
+    print(f"[OK] Created central SQLite database at {central_db_path}\n")
+    
+    # Create a shared lock for database access
+    db_lock = Lock()
 
     print(f"Running {len(pool_tasks)} simulations in parallel using {max_workers} processes...\n")
     pool_kwargs = {
         'processes': max_workers,
-        'initializer': init_worker,
-        'initargs': (TEMP_DIR, DB_TYPE, worker_extension),
+        'initializer': init_worker_shared,
+        'initargs': (central_db_path, 'sqlite', db_lock),
     }
     use_carriage = sys.stdout.isatty()
 
@@ -422,16 +399,8 @@ if __name__ == '__main__':
     status = f"Processed: {processed}/{len(pool_tasks)} - Completed"
     print(status.ljust(80), flush=True)
     
-    print("Merging results...", flush=True)
-    final_db_path = merge_temp_databases(output_dir, DB_FILE, TEMP_DIR, SAVE_ALL_PATHS, DB_TYPE)
-    print(f"\n✓ Analysis complete. Merged worker databases into {final_db_path}")
+    print(f"\n[OK] Analysis complete. Results saved to {central_db_path}")
 
-    create_indexes(final_db_path, SAVE_ALL_PATHS, DB_TYPE)
-    print("✓ Indexes created.")
-
-    if os.path.exists(TEMP_DIR):
-        try:
-            shutil.rmtree(TEMP_DIR)
-            print(f"✓ Cleaned up temp directory: {TEMP_DIR}")
-        except Exception as e:
-            print(f"⚠ Warning: Could not remove temp directory {TEMP_DIR}: {e}")
+    # Create indexes on the central database
+    create_indexes(central_db_path, SAVE_ALL_PATHS, 'sqlite')
+    print("[OK] Indexes created.")

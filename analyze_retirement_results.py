@@ -6,7 +6,7 @@ import numpy as np
 from matplotlib.patches import Rectangle
 import json
 
-from db import DatabaseBackend
+from db import DatabaseBackend, find_results_database
 
 # Load configuration
 with open(os.path.join(os.path.dirname(__file__), 'retirement_config.json'), 'r') as f:
@@ -21,14 +21,17 @@ targets_to_plot = config['FINAL_VALUE_TARGETS']
 
 def load_results():
     output_dir = os.path.join(os.path.dirname(__file__), 'output')
-    db_file = config.get('DB_FILE', 'backtest_retirement.duckdb')
+    db_file = config.get('DB_FILE', 'backtest_retirement.sqlite')
     db_type = config.get('DB_TYPE', None)
-    db_path = os.path.join(output_dir, db_file)
-    print("Loading results from the configured database...")
-    conn = DatabaseBackend.open(db_path, db_type=db_type)
+    
+    # Find the results database (priority: central SQLite, then configured DB)
+    db_path, detected_db_type = find_results_database(output_dir, db_file, db_type)
+    
+    print(f"Loading results from: {os.path.basename(db_path)}")
+    conn = DatabaseBackend.open(db_path, db_type=detected_db_type)
     results = conn.fetchdf('SELECT * FROM simulation_results')
     conn.close()
-    print(f"\nTotal simulations: {len(results)}")
+    print(f"Total simulations: {len(results)}\n")
     return results, output_dir
 
 # Precompute row labels

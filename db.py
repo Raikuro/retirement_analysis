@@ -2,30 +2,66 @@ import os
 import sqlite3
 import pandas as pd
 
-try:
-    import duckdb
-except ImportError:
-    duckdb = None
-
 
 def infer_db_type(db_type, db_path):
     if db_type:
         normalized = db_type.lower()
-        if normalized in ('duckdb', 'sqlite'):
+        if normalized == 'sqlite':
             return normalized
         raise ValueError(f"Unsupported DB_TYPE: {db_type}")
 
     extension = os.path.splitext(db_path)[1].lower()
-    if extension == '.duckdb':
-        return 'duckdb'
     if extension in ('.sqlite', '.db', '.sqlite3'):
         return 'sqlite'
-    return 'duckdb'
+    return 'sqlite'
 
 
-def database_extension(db_file):
-    extension = os.path.splitext(db_file)[1]
-    return extension if extension else '.db'
+def find_results_database(output_dir, db_file, db_type):
+    """
+    Find and return path to results database.
+    
+    Priority:
+    1. Central SQLite database (backtest_retirement.sqlite) - new Option 2
+    2. Configured database file (DB_FILE from config)
+    
+    Returns: (db_path, db_type)
+    """
+    # Check for central SQLite database first (Option 2)
+    central_db = os.path.join(output_dir, 'backtest_retirement.sqlite')
+    if os.path.exists(central_db):
+        return central_db, 'sqlite'
+    
+    # Fall back to configured database
+    db_path = os.path.join(output_dir, db_file)
+    if os.path.exists(db_path):
+        return db_path, db_type or infer_db_type(None, db_path)
+    
+    # No database found, return default
+    return db_path, db_type or 'sqlite'
+
+
+def create_central_database(output_dir, save_all_paths):
+    """
+    Create central results database for multi-process writing.
+    
+    Uses SQLite with WAL mode for better multi-process concurrency.
+    
+    Returns: (db_path, db_type)
+    """
+    central_db_path = os.path.join(output_dir, 'backtest_retirement.sqlite')
+    
+    # Remove existing database if present
+    if os.path.exists(central_db_path):
+        os.remove(central_db_path)
+    
+    # Create and initialize central database
+    conn = DatabaseBackend.open(central_db_path, db_type='sqlite')
+    conn.execute('PRAGMA journal_mode=WAL')  # Enable WAL for better concurrency
+    conn.execute('PRAGMA synchronous=NORMAL')  # Faster writes with WAL
+    conn.create_tables(save_all_paths)
+    conn.close()
+    
+    return central_db_path, 'sqlite'
 
 
 class DatabaseBackend:
@@ -35,10 +71,6 @@ class DatabaseBackend:
     @classmethod
     def open(cls, path, db_type=None):
         kind = infer_db_type(db_type, path)
-        if kind == 'duckdb':
-            if duckdb is None:
-                raise ImportError('duckdb is not installed')
-            return DuckDBBackend(path)
         return SQLiteBackend(path)
 
     def execute(self, sql, params=None):
@@ -106,30 +138,6 @@ class DatabaseBackend:
         if save_all_paths:
             self.execute('CREATE INDEX IF NOT EXISTS idx_paths_allocation ON simulation_paths(allocation)')
             self.execute('CREATE INDEX IF NOT EXISTS idx_paths_withdrawal_rate ON simulation_paths(withdrawal_rate)')
-
-
-class DuckDBBackend(DatabaseBackend):
-    def __init__(self, path):
-        super().__init__(path)
-        self.conn = duckdb.connect(database=path)
-
-    def execute(self, sql, params=None):
-        return self.conn.execute(sql, params or [])
-
-    def executemany(self, sql, params):
-        return self.conn.executemany(sql, params)
-
-    def fetchdf(self, sql, params=None):
-        return self.conn.execute(sql, params or []).fetchdf()
-
-    def close(self):
-        self.conn.close()
-
-    def configure_worker(self):
-        try:
-            self.execute('PRAGMA threads=1')
-        except Exception:
-            pass
 
 
 class SQLiteBackend(DatabaseBackend):
