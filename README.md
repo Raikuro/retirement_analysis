@@ -8,15 +8,15 @@ This project simulates retirement withdrawal strategies using historical inflati
 
 ## Requirements
 - Python 3.7+ (or newer)
-- pandas
-- numpy
-- matplotlib
-- seaborn
-- python-dateutil
+- pandas>=1.3.0
+- numpy>=1.21.0
+- matplotlib>=3.4.0
+- seaborn>=0.11.0
+- python-dateutil>=2.8.0
 
 Install dependencies with:
 ```bash
-pip install pandas numpy matplotlib seaborn python-dateutil duckdb
+pip install pandas>=1.3.0 numpy>=1.21.0 matplotlib>=3.4.0 seaborn>=0.11.0 python-dateutil>=2.8.0
 ```
 
 ## Docker Usage
@@ -60,7 +60,7 @@ python analyze_retirement_results.py
 ## Generated files
 Results are saved in `retirement_analysis/output/`.
 
-- `backtest_retirement.duckdb` (or configured database file): database containing simulation results and optional full paths.
+- `backtest_retirement.sqlite` (or configured database file): database containing simulation results and optional full paths.
 - `success_matrix_target_0.png`, `success_matrix_target_50.png`, `success_matrix_target_100.png`: success rate matrices.
 
 ## What each script does
@@ -77,6 +77,9 @@ Results are saved in `retirement_analysis/output/`.
 ### `analyze_retirement_results.py`
 - Reads the configured database produced by the backtest.
 - Creates success matrices and saves PNG files in `output/`.
+
+## Configuration
+The analysis parameters are configured in `retirement_config.json`. You can edit this file to change initial portfolio value, retirement periods, allocations, withdrawal rates, and other settings before running the backtest.
 
 ## Quick note
 Recommended flow:

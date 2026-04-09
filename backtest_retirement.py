@@ -25,6 +25,13 @@ FINAL_VALUE_TARGETS = config['FINAL_VALUE_TARGETS']
 SAVE_ALL_PATHS = config['SAVE_ALL_PATHS']
 DATA_START = config['DATA_START']
 DATA_END = config['DATA_END']
+INPUT_DIR = config['INPUT_DIR']
+STOCKS_FILE = config['STOCKS_FILE']
+STOCKS_COLUMN = config['STOCKS_COLUMN']
+BONDS_FILE = config['BONDS_FILE']
+BONDS_COLUMN = config['BONDS_COLUMN']
+CPI_FILE = config['CPI_FILE']
+CPI_COLUMN = config['CPI_COLUMN']
 WORKER_DB_CONN = None
 CENTRAL_DB_LOCK = None  # Shared lock for database access
 CENTRAL_DB_PATH = None  # Path to central database
@@ -60,35 +67,37 @@ def create_indexes(db_path, save_all_paths, db_type):
 
 def load_data():
     dirscript = os.path.dirname(os.path.abspath(__file__))
-    input_dir = os.path.normpath(os.path.join(dirscript, '..', 'input'))
+    input_dir = os.path.normpath(os.path.join(dirscript, INPUT_DIR))
 
-    sp500 = pd.read_csv(os.path.join(input_dir, 'sp500_tr.csv'))
-    bonds = pd.read_csv(os.path.join(input_dir, 'treasury_10y.csv'))
-    cpi = pd.read_csv(os.path.join(input_dir, 'cpi.csv'))
+    stocks_df = pd.read_csv(os.path.join(input_dir, STOCKS_FILE))
+    bonds_df = pd.read_csv(os.path.join(input_dir, BONDS_FILE))
+    cpi_df = pd.read_csv(os.path.join(input_dir, CPI_FILE))
 
     # Convert dates
-    sp500['Fecha'] = pd.to_datetime(sp500['Fecha'], format='%m/%Y')
-    bonds['Fecha'] = pd.to_datetime(bonds['Fecha'], format='%m/%Y')
-    cpi['Fecha'] = pd.to_datetime(cpi['Fecha'], format='%m/%Y')
+    stocks_df['Fecha'] = pd.to_datetime(stocks_df['Fecha'], format='%m/%Y')
+    bonds_df['Fecha'] = pd.to_datetime(bonds_df['Fecha'], format='%m/%Y')
+    cpi_df['Fecha'] = pd.to_datetime(cpi_df['Fecha'], format='%m/%Y')
 
     # Convert values to float
-    sp500['SPX-TR'] = sp500['SPX-TR'].str.replace(',', '').astype(float)
-    bonds['10Y BM'] = bonds['10Y BM'].str.replace(',', '').astype(float)
-    cpi['CPI'] = cpi['CPI'].astype(float)
+    stocks_df[STOCKS_COLUMN] = stocks_df[STOCKS_COLUMN].str.replace(',', '').astype(float)
+    bonds_df[BONDS_COLUMN] = bonds_df[BONDS_COLUMN].str.replace(',', '').astype(float)
+    cpi_df[CPI_COLUMN] = cpi_df[CPI_COLUMN].astype(float)
+
+    # Rename columns to generic names
+    stocks_df = stocks_df.rename(columns={STOCKS_COLUMN: 'Stocks'})
+    bonds_df = bonds_df.rename(columns={BONDS_COLUMN: 'Bonds'})
+    cpi_df = cpi_df.rename(columns={CPI_COLUMN: 'CPI'})
 
     # Merge data
-    data = pd.merge(sp500, bonds, on='Fecha', how='inner')
-    data = pd.merge(data, cpi, on='Fecha', how='inner')
+    data = pd.merge(stocks_df[['Fecha', 'Stocks']], bonds_df[['Fecha', 'Bonds']], on='Fecha', how='inner')
+    data = pd.merge(data, cpi_df[['Fecha', 'CPI']], on='Fecha', how='inner')
     data = data.sort_values('Fecha').reset_index(drop=True)
 
-    # Rename columns for convenience
-    data.columns = ['Fecha', 'SP500', 'Bonds', 'CPI']
-
-    data['SP500_Return'] = data['SP500'].pct_change()
+    data['Stocks_Return'] = data['Stocks'].pct_change()
     data['Bonds_Return'] = data['Bonds'].pct_change()
     data['CPI_Return'] = data['CPI'].pct_change()
 
-    data['SP500_Real_Return'] = (1 + data['SP500_Return']) / (1 + data['CPI_Return']) - 1
+    data['Stocks_Real_Return'] = (1 + data['Stocks_Return']) / (1 + data['CPI_Return']) - 1
     data['Bonds_Real_Return'] = (1 + data['Bonds_Return']) / (1 + data['CPI_Return']) - 1
 
     return data
@@ -123,16 +132,16 @@ while current_date <= max_start_date:
 
 # Convert global arrays for workers
 fecha_array = data['Fecha'].to_numpy()
-sp500_real = data['SP500_Real_Return'].to_numpy()
+stocks_real = data['Stocks_Real_Return'].to_numpy()
 bonds_real = data['Bonds_Real_Return'].to_numpy()
 
 
-def run_portfolio_path(start_idx, target_sp500_pct, target_bonds_pct, monthly_withdrawal, max_months):
-    sp500_value = INITIAL_PORTFOLIO * target_sp500_pct
+def run_portfolio_path(start_idx, target_stocks_pct, target_bonds_pct, monthly_withdrawal, max_months):
+    stocks_value = INITIAL_PORTFOLIO * target_stocks_pct
     bonds_value = INITIAL_PORTFOLIO * target_bonds_pct
 
     path_dates = []
-    path_sp500 = []
+    path_stocks = []
     path_bonds = []
     path_total = []
     path_withdrawals = []
@@ -143,20 +152,20 @@ def run_portfolio_path(start_idx, target_sp500_pct, target_bonds_pct, monthly_wi
     current_max = INITIAL_PORTFOLIO
 
     for idx in range(start_idx, start_idx + max_months):
-        sp500_value *= (1 + sp500_real[idx])
+        stocks_value *= (1 + stocks_real[idx])
         bonds_value *= (1 + bonds_real[idx])
 
-        current_total = sp500_value + bonds_value
+        current_total = stocks_value + bonds_value
         withdrawal_remaining = monthly_withdrawal
 
-        current_sp500_pct = sp500_value / current_total if current_total > 0 else 0
+        current_stocks_pct = stocks_value / current_total if current_total > 0 else 0
         current_bonds_pct = bonds_value / current_total if current_total > 0 else 0
 
-        if current_sp500_pct > target_sp500_pct and sp500_value > 0:
-            excess_sp500 = sp500_value - (current_total * target_sp500_pct)
-            withdrawal_from_sp500 = min(excess_sp500, withdrawal_remaining)
-            sp500_value -= withdrawal_from_sp500
-            withdrawal_remaining -= withdrawal_from_sp500
+        if current_stocks_pct > target_stocks_pct and stocks_value > 0:
+            excess_stocks = stocks_value - (current_total * target_stocks_pct)
+            withdrawal_from_stocks = min(excess_stocks, withdrawal_remaining)
+            stocks_value -= withdrawal_from_stocks
+            withdrawal_remaining -= withdrawal_from_stocks
 
         if withdrawal_remaining > 0 and current_bonds_pct > target_bonds_pct and bonds_value > 0:
             excess_bonds = bonds_value - (current_total * target_bonds_pct)
@@ -165,26 +174,26 @@ def run_portfolio_path(start_idx, target_sp500_pct, target_bonds_pct, monthly_wi
             withdrawal_remaining -= withdrawal_from_bonds
 
         if withdrawal_remaining > 0:
-            total_after_partial = sp500_value + bonds_value
+            total_after_partial = stocks_value + bonds_value
             if total_after_partial > 0:
-                sp500_withdrawal = withdrawal_remaining * (sp500_value / total_after_partial)
+                stocks_withdrawal = withdrawal_remaining * (stocks_value / total_after_partial)
                 bonds_withdrawal = withdrawal_remaining * (bonds_value / total_after_partial)
-                sp500_value -= min(sp500_value, sp500_withdrawal)
+                stocks_value -= min(stocks_value, stocks_withdrawal)
                 bonds_value -= min(bonds_value, bonds_withdrawal)
 
-        current_total = sp500_value + bonds_value
+        current_total = stocks_value + bonds_value
         if current_total > 0:
-            sp500_value = current_total * target_sp500_pct
+            stocks_value = current_total * target_stocks_pct
             bonds_value = current_total * target_bonds_pct
 
-        portfolio_value = sp500_value + bonds_value
+        portfolio_value = stocks_value + bonds_value
         withdrawn_amount = monthly_withdrawal - withdrawal_remaining
 
         current_min = min(current_min, portfolio_value)
         current_max = max(current_max, portfolio_value)
 
         path_dates.append(fecha_array[idx])
-        path_sp500.append(sp500_value)
+        path_stocks.append(stocks_value)
         path_bonds.append(bonds_value)
         path_total.append(max(0, portfolio_value))
         path_withdrawals.append(max(0.0, withdrawn_amount))
@@ -196,7 +205,7 @@ def run_portfolio_path(start_idx, target_sp500_pct, target_bonds_pct, monthly_wi
 
     return {
         'dates': path_dates,
-        'sp500': path_sp500,
+        'stocks': path_stocks,
         'bonds': path_bonds,
         'total': path_total,
         'withdrawals': path_withdrawals,
@@ -219,7 +228,7 @@ def insert_path_rows(start_date, allocation, withdrawal_rate, path_data):
              float(withdrawal_rate),
              int(month_index),
              format_date(date),
-             float(path_data['sp500'][month_index - 1]),
+             float(path_data['stocks'][month_index - 1]),
              float(path_data['bonds'][month_index - 1]),
              float(path_data['total'][month_index - 1]),
              float(path_data['withdrawals'][month_index - 1]),
@@ -232,7 +241,7 @@ def insert_path_rows(start_date, allocation, withdrawal_rate, path_data):
             WORKER_DB_CONN.execute('BEGIN TRANSACTION')
             WORKER_DB_CONN.executemany(
                 '''INSERT INTO simulation_paths
-                   (start_date, allocation, withdrawal_rate, month, date, sp500, bonds, total, withdrawal, min_value, max_value)
+                   (start_date, allocation, withdrawal_rate, month, date, stocks, bonds, total, withdrawal, min_value, max_value)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                 rows
             )
@@ -293,12 +302,12 @@ def worker_simulation(task):
 
     max_period_months = max(valid_periods) * 12
 
-    sp500_pct, bonds_pct = allocation
-    target_sp500_pct = sp500_pct / 100
+    stocks_pct, bonds_pct = allocation
+    target_stocks_pct = stocks_pct / 100
     target_bonds_pct = bonds_pct / 100
     monthly_withdrawal = (INITIAL_PORTFOLIO * withdrawal_rate / 100) / 12
 
-    path_data = run_portfolio_path(start_idx, target_sp500_pct, target_bonds_pct, monthly_withdrawal, max_period_months)
+    path_data = run_portfolio_path(start_idx, target_stocks_pct, target_bonds_pct, monthly_withdrawal, max_period_months)
     withdrawals = path_data['withdrawals']
     months_lasted = len(withdrawals)
 

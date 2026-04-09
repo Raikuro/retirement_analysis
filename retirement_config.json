@@ -14,5 +14,12 @@
   "DB_TYPE": "sqlite",
   "DB_FILE": "backtest_retirement.sqlite",
   "DATA_START": "1871-02-01",
-  "DATA_END": "2016-12-01"
+  "DATA_END": "2016-12-01",
+  "INPUT_DIR": "../input",
+  "STOCKS_FILE": "sp500_tr.csv",
+  "STOCKS_COLUMN": "SPX-TR",
+  "BONDS_FILE": "treasury_10y.csv",
+  "BONDS_COLUMN": "10Y BM",
+  "CPI_FILE": "cpi.csv",
+  "CPI_COLUMN": "CPI"
 }

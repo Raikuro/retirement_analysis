@@ -121,7 +121,7 @@ class DatabaseBackend:
                     withdrawal_rate DOUBLE,
                     month INTEGER,
                     date DATE,
-                    sp500 DOUBLE,
+                    stocks DOUBLE,
                     bonds DOUBLE,
                     total DOUBLE,
                     withdrawal DOUBLE,
