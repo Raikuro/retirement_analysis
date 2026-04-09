@@ -4,13 +4,18 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
 from matplotlib.patches import Rectangle
+import json
+
+# Load configuration
+with open(os.path.join(os.path.dirname(__file__), 'retirement_config.json'), 'r') as f:
+    config = json.load(f)
 
 # CONFIGURATION
-periods = [30, 40, 50, 60]
-allocations_order = ['100/0', '75/25', '50/50', '25/75', '0/100']
-allocations_labels = ['100% Stocks', '75% Stocks', '50% Stocks', '25% Stocks', '0% Stocks']
-withdrawal_rates = [3.0, 3.25, 3.5, 3.75, 4.0, 4.25, 4.5, 4.75, 5.0]
-targets_to_plot = [0.0, 0.5, 1.0]
+periods = config['RETIREMENT_PERIODS']
+allocations_order = [f"{a[0]}/{a[1]}" for a in config['ALLOCATIONS']]
+allocations_labels = [f"{a[0]}% Stocks" for a in config['ALLOCATIONS']]
+withdrawal_rates = config['WITHDRAWAL_RATES']
+targets_to_plot = config['FINAL_VALUE_TARGETS']
 
 # Load results
 output_dir = os.path.join(os.path.dirname(__file__), 'output')
