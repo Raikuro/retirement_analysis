@@ -6,6 +6,8 @@ import numpy as np
 from matplotlib.patches import Rectangle
 import json
 
+from db import DatabaseBackend
+
 # Load configuration
 with open(os.path.join(os.path.dirname(__file__), 'retirement_config.json'), 'r') as f:
     config = json.load(f)
@@ -17,20 +19,26 @@ allocations_labels = [f"{a[0]}% Stocks" for a in config['ALLOCATIONS']]
 withdrawal_rates = config['WITHDRAWAL_RATES']
 targets_to_plot = config['FINAL_VALUE_TARGETS']
 
-# Load results
-output_dir = os.path.join(os.path.dirname(__file__), 'output')
-print("Loading results...")
-results = pd.read_csv(os.path.join(output_dir, 'backtest_retirement_detailed.csv'))
-print(f"\nTotal simulations: {len(results)}")
+def load_results():
+    output_dir = os.path.join(os.path.dirname(__file__), 'output')
+    db_file = config.get('DB_FILE', 'backtest_retirement.duckdb')
+    db_type = config.get('DB_TYPE', None)
+    db_path = os.path.join(output_dir, db_file)
+    print("Loading results from the configured database...")
+    conn = DatabaseBackend.open(db_path, db_type=db_type)
+    results = conn.fetchdf('SELECT * FROM simulation_results')
+    conn.close()
+    print(f"\nTotal simulations: {len(results)}")
+    return results, output_dir
 
 # Precompute row labels
 row_labels = [f"{period}y" for alloc in allocations_order for period in periods]
 
-def plot_success_matrix(matrix, target_pct, output_dir):
+def plot_success_matrix(matrix, target_pct, output_dir, row_labels):
     fig, ax = plt.subplots(figsize=(14, 10), dpi=150)
     cmap = sns.color_palette("RdYlGn", as_cmap=True)
-    sns.heatmap(matrix, annot=True, fmt='.1f', cmap=cmap, 
-                cbar_kws={'label': 'Success Rate (%)'}, 
+    sns.heatmap(matrix, annot=True, fmt='.1f', cmap=cmap,
+                cbar_kws={'label': 'Success Rate (%)'},
                 ax=ax, vmin=0, vmax=100,
                 xticklabels=[f"{r}%" for r in withdrawal_rates],
                 yticklabels=row_labels,
@@ -59,19 +67,25 @@ def plot_success_matrix(matrix, target_pct, output_dir):
     plt.savefig(filepath, dpi=300, bbox_inches='tight')
     plt.close()
 
-# Generate matrices and plots
-for target in targets_to_plot:
-    print(f"\nGenerating matrix for target {target}...")
-    target_data = results[results['final_value_target'] == target]
-    
-    # Create matrix using groupby
-    grouped = target_data.groupby(['allocation', 'retirement_period', 'withdrawal_rate'])['success'].mean() * 100
-    matrix_data = []
-    for alloc in allocations_order:
-        for period in periods:
-            row_values = [grouped.get((alloc, period, rate), 0) for rate in withdrawal_rates]
-            matrix_data.append(row_values)
-    
-    matrix = np.array(matrix_data)
-    target_pct = int(target * 100)
-    plot_success_matrix(matrix, target_pct, output_dir)
+def main():
+    results, output_dir = load_results()
+    row_labels = [f"{period}y" for alloc in allocations_order for period in periods]
+
+    for target in targets_to_plot:
+        print(f"\nGenerating matrix for target {target}...")
+        target_data = results[results['final_value_target'] == target]
+
+        grouped = target_data.groupby(['allocation', 'retirement_period', 'withdrawal_rate'])['success'].mean() * 100
+        matrix_data = []
+        for alloc in allocations_order:
+            for period in periods:
+                row_values = [grouped.get((alloc, period, rate), 0) for rate in withdrawal_rates]
+                matrix_data.append(row_values)
+
+        matrix = np.array(matrix_data)
+        target_pct = int(target * 100)
+        plot_success_matrix(matrix, target_pct, output_dir, row_labels)
+
+
+if __name__ == '__main__':
+    main()

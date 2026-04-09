@@ -16,7 +16,7 @@ This project simulates retirement withdrawal strategies using historical inflati
 
 Install dependencies with:
 ```bash
-pip install pandas numpy matplotlib seaborn python-dateutil
+pip install pandas numpy matplotlib seaborn python-dateutil duckdb
 ```
 
 ## Docker Usage
@@ -44,6 +44,8 @@ docker run -v $(pwd)/../input:/app/input \
 
 Results will be available in the `output/` directory. You can edit `../input/` files and `retirement_config.json` on your host and re-run without rebuilding.
 
+The configured database file will be written to the output directory.
+
 ## Basic usage
 1. Run the full backtest:
 ```bash
@@ -58,7 +60,7 @@ python analyze_retirement_results.py
 ## Generated files
 Results are saved in `retirement_analysis/output/`.
 
-- `backtest_retirement_detailed.csv`: full simulation results for every scenario.
+- `backtest_retirement.duckdb` (or configured database file): database containing simulation results and optional full paths.
 - `success_matrix_target_0.png`, `success_matrix_target_50.png`, `success_matrix_target_100.png`: success rate matrices.
 
 ## What each script does
@@ -70,10 +72,10 @@ Results are saved in `retirement_analysis/output/`.
 - Tests multiple combinations: allocations (100/0 to 0/100 Stocks/Bonds), withdrawal rates (3% to 5%), and retirement horizons (30-60 years).
 - Generates monthly start dates from 1871 through the latest date available for each horizon.
 - Uses multiprocessing to speed up simulation.
-- Saves detailed results in `output/backtest_retirement_detailed.csv`.
+- Saves detailed results into the configured output database file.
 
 ### `analyze_retirement_results.py`
-- Reads the CSV produced by the backtest.
+- Reads the configured database produced by the backtest.
 - Creates success matrices and saves PNG files in `output/`.
 
 ## Quick note

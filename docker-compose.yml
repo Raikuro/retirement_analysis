@@ -6,4 +6,3 @@ services:
       - ../input:/app/input
       - ./retirement_config.json:/app/retirement_analysis/retirement_config.json
       - ./output:/app/retirement_analysis/output
-      - ./temp:/app/retirement_analysis/temp

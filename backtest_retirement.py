@@ -1,5 +1,3 @@
-import csv
-import heapq
 import os
 import shutil
 import pandas as pd
@@ -8,6 +6,9 @@ from dateutil.relativedelta import relativedelta
 import time
 from multiprocessing import Pool, cpu_count
 import json
+import sys
+
+from db import DatabaseBackend, database_extension
 
 # Load configuration
 with open(os.path.join(os.path.dirname(__file__), 'retirement_config.json'), 'r') as f:
@@ -22,40 +23,79 @@ FINAL_VALUE_TARGETS = config['FINAL_VALUE_TARGETS']
 
 # Write a complete monthly path for every execution
 SAVE_ALL_PATHS = config['SAVE_ALL_PATHS']
-PATH_OUTPUT_FILE = config['PATH_OUTPUT_FILE']
+DB_TYPE = config.get('DB_TYPE', None)
+DB_FILE = config.get('DB_FILE', 'backtest_retirement.duckdb')
 TEMP_DIR = os.path.join(os.path.dirname(__file__), config['TEMP_DIR'])
-WORKER_PATH_FILE = None
+WORKER_DB_CONN = None
 
 
-def init_worker(temp_dir):
-    global WORKER_PATH_FILE
-    WORKER_PATH_FILE = os.path.join(temp_dir, f'paths_{os.getpid()}.csv')
-    open(WORKER_PATH_FILE, 'a', newline='', encoding='utf-8').close()
+def quote_path(path):
+    return path.replace("'", "''")
 
 
-def merge_path_temp_files(temp_dir, output_file, output_fields):
-    temp_files = sorted(
-        [os.path.join(temp_dir, f) for f in os.listdir(temp_dir) if f.endswith('.csv')]
+def format_date(date):
+    if isinstance(date, str):
+        return date
+    try:
+        return date.strftime('%Y-%m-%d')
+    except Exception:
+        return pd.Timestamp(date).strftime('%Y-%m-%d')
+
+
+def init_worker(temp_dir, db_type, worker_extension):
+    global WORKER_DB_CONN
+    os.makedirs(temp_dir, exist_ok=True)
+    worker_db_path = os.path.join(temp_dir, f'worker_{os.getpid()}{worker_extension}')
+    if os.path.exists(worker_db_path):
+        os.remove(worker_db_path)
+    WORKER_DB_CONN = DatabaseBackend.open(worker_db_path, db_type=db_type)
+    WORKER_DB_CONN.configure_worker()
+    WORKER_DB_CONN.create_tables(SAVE_ALL_PATHS)
+
+
+def prepare_temp_dir(temp_dir):
+    if os.path.exists(temp_dir):
+        for filename in os.listdir(temp_dir):
+            file_path = os.path.join(temp_dir, filename)
+            if os.path.isfile(file_path):
+                os.remove(file_path)
+            elif os.path.isdir(file_path):
+                shutil.rmtree(file_path)
+    else:
+        os.makedirs(temp_dir, exist_ok=True)
+    return temp_dir
+
+
+def merge_temp_databases(output_dir, db_file, temp_dir, save_all_paths, db_type):
+    final_db_path = os.path.join(output_dir, db_file)
+    if os.path.exists(final_db_path):
+        os.remove(final_db_path)
+
+    os.makedirs(output_dir, exist_ok=True)
+    conn = DatabaseBackend.open(final_db_path, db_type=db_type)
+    conn.create_tables(save_all_paths)
+
+    worker_files = sorted(
+        [os.path.join(temp_dir, f) for f in os.listdir(temp_dir) if f.endswith(database_extension(db_file))]
     )
-    iterators = []
+    print(f"Merging {len(worker_files)} worker databases...", flush=True)
+    for idx, worker_file in enumerate(worker_files, start=1):
+        attach_name = f'worker_{idx-1}'
+        conn.attach(attach_name, worker_file)
+        conn.execute(f"INSERT INTO simulation_results SELECT * FROM {attach_name}.simulation_results")
+        if save_all_paths:
+            conn.execute(f"INSERT INTO simulation_paths SELECT * FROM {attach_name}.simulation_paths")
+        conn.detach(attach_name)
+        print(f"  Merged worker {idx}/{len(worker_files)}", flush=True)
 
-    def row_generator(file_path):
-        with open(file_path, newline='', encoding='utf-8') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                try:
-                    yield (int(row['task_index']), row)
-                except (KeyError, TypeError, ValueError):
-                    continue
+    conn.close()
+    return final_db_path
 
-    merged = heapq.merge(*(row_generator(path) for path in temp_files))
 
-    with open(output_file, 'w', newline='', encoding='utf-8') as out_f:
-        writer = csv.DictWriter(out_f, fieldnames=output_fields)
-        writer.writeheader()
-        for _, row in merged:
-            row.pop('task_index', None)
-            writer.writerow(row)
+def create_indexes(db_path, save_all_paths, db_type):
+    conn = DatabaseBackend.open(db_path, db_type=db_type)
+    conn.create_indexes(save_all_paths)
+    conn.close()
 
 
 def load_data():
@@ -196,33 +236,71 @@ def run_portfolio_path(start_idx, target_sp500_pct, target_bonds_pct, monthly_wi
     }
 
 
-def write_path_rows(path_file, task_index, start_date, allocation, withdrawal_rate, path_data):
+def insert_path_rows(start_date, allocation, withdrawal_rate, path_data):
+    if not SAVE_ALL_PATHS or WORKER_DB_CONN is None:
+        return
+
     allocation_str = f"{allocation[0]}/{allocation[1]}"
-    fieldnames = [
-        'task_index', 'start_date', 'allocation', 'withdrawal_rate', 'month', 'date',
-        'sp500', 'bonds', 'total', 'withdrawal', 'min_value', 'max_value'
-    ]
-    file_is_empty = not os.path.exists(path_file) or os.path.getsize(path_file) == 0
-    with open(path_file, 'a', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        if file_is_empty:
-            writer.writeheader()
-        for month_index, date in enumerate(path_data['dates'], start=1):
-            date_str = pd.Timestamp(date).strftime('%Y-%m-%d')
-            writer.writerow({
-                'task_index': task_index,
-                'start_date': pd.Timestamp(start_date).strftime('%Y-%m-%d'),
-                'allocation': allocation_str,
-                'withdrawal_rate': withdrawal_rate,
-                'month': month_index,
-                'date': date_str,
-                'sp500': path_data['sp500'][month_index - 1],
-                'bonds': path_data['bonds'][month_index - 1],
-                'total': path_data['total'][month_index - 1],
-                'withdrawal': path_data['withdrawals'][month_index - 1],
-                'min_value': path_data['min_values'][month_index - 1],
-                'max_value': path_data['max_values'][month_index - 1],
-            })
+    start_date_str = format_date(start_date)
+    rows = []
+    for month_index, date in enumerate(path_data['dates'], start=1):
+        rows.append(
+            (start_date_str,
+             allocation_str,
+             float(withdrawal_rate),
+             int(month_index),
+             format_date(date),
+             float(path_data['sp500'][month_index - 1]),
+             float(path_data['bonds'][month_index - 1]),
+             float(path_data['total'][month_index - 1]),
+             float(path_data['withdrawals'][month_index - 1]),
+             float(path_data['min_values'][month_index - 1]),
+             float(path_data['max_values'][month_index - 1]))
+        )
+
+    if rows:
+        WORKER_DB_CONN.execute('BEGIN TRANSACTION')
+        WORKER_DB_CONN.executemany(
+            '''INSERT INTO simulation_paths
+               (start_date, allocation, withdrawal_rate, month, date, sp500, bonds, total, withdrawal, min_value, max_value)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            rows
+        )
+        WORKER_DB_CONN.execute('COMMIT')
+
+
+def insert_simulation_results(result_records):
+    if WORKER_DB_CONN is None or not result_records:
+        return
+
+    rows = []
+    for record in result_records:
+        rows.append(
+            (record['start_date'].strftime('%Y-%m-%d'),
+             record['end_date'].strftime('%Y-%m-%d'),
+             str(record['allocation']),
+             float(record['withdrawal_rate']),
+             int(record['retirement_period']),
+             float(record['final_value_target']),
+             float(record['final_value']),
+             bool(record['success']),
+             int(record['months_lasted']),
+             float(record['years_lasted']),
+             float(record['min_value']),
+             float(record['max_value']),
+             float(record['total_withdrawn']))
+        )
+
+    WORKER_DB_CONN.execute('BEGIN TRANSACTION')
+    WORKER_DB_CONN.executemany(
+        '''INSERT INTO simulation_results
+           (start_date, end_date, allocation, withdrawal_rate, retirement_period,
+            final_value_target, final_value, success, months_lasted, years_lasted,
+            min_value, max_value, total_withdrawn)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+        rows
+    )
+    WORKER_DB_CONN.execute('COMMIT')
 
 
 def worker_simulation(task):
@@ -290,10 +368,11 @@ def worker_simulation(task):
                 'total_withdrawn': total_withdrawn,
             })
 
-    if SAVE_ALL_PATHS and WORKER_PATH_FILE is not None:
-        write_path_rows(WORKER_PATH_FILE, task_index, start_date, allocation, withdrawal_rate, path_data)
+    if SAVE_ALL_PATHS:
+        insert_path_rows(start_date, allocation, withdrawal_rate, path_data)
 
-    return result_records
+    insert_simulation_results(result_records)
+    return len(result_records)
 
 
 if __name__ == '__main__':
@@ -301,72 +380,58 @@ if __name__ == '__main__':
     print(f"From: {start_dates[0].strftime('%m/%Y')} to {start_dates[-1].strftime('%m/%Y')}\n")
 
     # Prepare tasks and run the pool
-    all_results = []
     pool_tasks = [(i, idx, alloc, wr) for i, (idx, alloc, wr) in enumerate((idx, alloc, wr) for idx in range(len(start_dates)) for alloc in ALLOCATIONS for wr in WITHDRAWAL_RATES)]
     processed = 0
+    total_records = 0
     start_time = time.time()
     max_workers = max(1, cpu_count() - 1)
 
     output_dir = os.path.join(os.path.dirname(__file__), 'output')
     os.makedirs(output_dir, exist_ok=True)
-    path_output_file = os.path.join(output_dir, PATH_OUTPUT_FILE)
+    prepare_temp_dir(TEMP_DIR)
+    worker_extension = database_extension(DB_FILE)
 
-    if SAVE_ALL_PATHS:
-        if os.path.exists(TEMP_DIR):
-            for filename in os.listdir(TEMP_DIR):
-                file_path = os.path.join(TEMP_DIR, filename)
-                if os.path.isfile(file_path):
-                    os.remove(file_path)
-                elif os.path.isdir(file_path):
-                    shutil.rmtree(file_path)
-        else:
-            os.makedirs(TEMP_DIR, exist_ok=True)
+    print(f"Running {len(pool_tasks)} simulations in parallel using {max_workers} processes...\n")
+    pool_kwargs = {
+        'processes': max_workers,
+        'initializer': init_worker,
+        'initargs': (TEMP_DIR, DB_TYPE, worker_extension),
+    }
+    use_carriage = sys.stdout.isatty()
 
-        temp_dir = TEMP_DIR
-        print(f"Saving full paths to temporary files in {temp_dir}...\n")
-        pool_kwargs = {
-            'processes': max_workers,
-            'initializer': init_worker,
-            'initargs': (temp_dir,),
-        }
-    else:
-        print(f"Running {len(pool_tasks)} simulations in parallel using {max_workers} processes...\n")
-        pool_kwargs = {
-            'processes': max_workers,
-        }
+    chunksize = max(1, len(pool_tasks) // (max_workers * 4))
 
     with Pool(**pool_kwargs) as pool:
-        for result_batch in pool.imap_unordered(worker_simulation, pool_tasks, chunksize=16):
-            if result_batch:
-                all_results.extend(result_batch)
-
+        for result_batch in pool.imap_unordered(worker_simulation, pool_tasks, chunksize=chunksize):
             processed += 1
+            if result_batch:
+                total_records += result_batch
+
             if processed % 1000 == 0:
                 elapsed = time.time() - start_time
                 rate = processed / elapsed
-                remaining = (len(pool_tasks) - processed) / rate
-                status = f"Processed: {processed}/{len(pool_tasks)} - Remaining time: {remaining/60:.1f} min"
-                print(status.ljust(80), end='\r', flush=True)
+                remaining_seconds = int((len(pool_tasks) - processed) / rate)
+                remaining_minutes = remaining_seconds // 60
+                remaining_secs = remaining_seconds % 60
+                status = f"Processed: {processed}/{len(pool_tasks)} - Remaining time: {remaining_minutes}m {remaining_secs}s"
+                if use_carriage:
+                    print(status.ljust(80), end='\r', flush=True)
+                else:
+                    print(status.ljust(80), flush=True)
 
     status = f"Processed: {processed}/{len(pool_tasks)} - Completed"
-    print(status.ljust(80))
-    print("\n✓ Analysis complete, saving results...")
-    if SAVE_ALL_PATHS:
-        output_fields = [
-            'start_date', 'allocation', 'withdrawal_rate', 'month', 'date',
-            'sp500', 'bonds', 'total', 'withdrawal', 'min_value', 'max_value'
-        ]
-        merge_path_temp_files(temp_dir, path_output_file, output_fields)
-        for filename in os.listdir(temp_dir):
-            file_path = os.path.join(temp_dir, filename)
-            if os.path.isfile(file_path):
-                os.remove(file_path)
-            elif os.path.isdir(file_path):
-                shutil.rmtree(file_path)
-        print(f"Merged path temp files into {path_output_file}\n")
+    print(status.ljust(80), flush=True)
+    
+    print("Merging results...", flush=True)
+    final_db_path = merge_temp_databases(output_dir, DB_FILE, TEMP_DIR, SAVE_ALL_PATHS, DB_TYPE)
+    print(f"\n✓ Analysis complete. Merged worker databases into {final_db_path}")
 
-    # Convert to DataFrame and save results
-    results_df = pd.DataFrame(all_results)
-    output_dir = os.path.join(os.path.dirname(__file__), 'output')
-    os.makedirs(output_dir, exist_ok=True)
-    results_df.to_csv(os.path.join(output_dir, 'backtest_retirement_detailed.csv'), index=False)
+    create_indexes(final_db_path, SAVE_ALL_PATHS, DB_TYPE)
+    print("✓ Indexes created.")
+
+    if os.path.exists(TEMP_DIR):
+        try:
+            shutil.rmtree(TEMP_DIR)
+            print(f"✓ Cleaned up temp directory: {TEMP_DIR}")
+        except Exception as e:
+            print(f"⚠ Warning: Could not remove temp directory {TEMP_DIR}: {e}")
