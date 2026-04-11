@@ -218,70 +218,14 @@ def insert_path_rows(start_date, allocation, withdrawal_rate, path_data):
     if not SAVE_ALL_PATHS or WORKER_DB_CONN is None:
         return
 
-    allocation_str = f"{allocation[0]}/{allocation[1]}"
-    start_date_str = format_date(start_date)
-    rows = []
-    for month_index, date in enumerate(path_data['dates'], start=1):
-        rows.append(
-            (start_date_str,
-             allocation_str,
-             float(withdrawal_rate),
-             int(month_index),
-             format_date(date),
-             float(path_data['stocks'][month_index - 1]),
-             float(path_data['bonds'][month_index - 1]),
-             float(path_data['total'][month_index - 1]),
-             float(path_data['withdrawals'][month_index - 1]),
-             float(path_data['min_values'][month_index - 1]),
-             float(path_data['max_values'][month_index - 1]))
-        )
-
-    if rows and CENTRAL_DB_LOCK is not None:
-        with CENTRAL_DB_LOCK:
-            WORKER_DB_CONN.execute('BEGIN TRANSACTION')
-            WORKER_DB_CONN.executemany(
-                '''INSERT INTO simulation_paths
-                   (start_date, allocation, withdrawal_rate, month, date, stocks, bonds, total, withdrawal, min_value, max_value)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                rows
-            )
-            WORKER_DB_CONN.execute('COMMIT')
+    WORKER_DB_CONN.insert_path_rows(start_date, allocation, withdrawal_rate, path_data, CENTRAL_DB_LOCK)
 
 
 def insert_simulation_results(result_records):
     if WORKER_DB_CONN is None or not result_records:
         return
 
-    rows = []
-    for record in result_records:
-        rows.append(
-            (record['start_date'].strftime('%Y-%m-%d'),
-             record['end_date'].strftime('%Y-%m-%d'),
-             str(record['allocation']),
-             float(record['withdrawal_rate']),
-             int(record['retirement_period']),
-             float(record['final_value_target']),
-             float(record['final_value']),
-             bool(record['success']),
-             int(record['months_lasted']),
-             float(record['years_lasted']),
-             float(record['min_value']),
-             float(record['max_value']),
-             float(record['total_withdrawn']))
-        )
-
-    if CENTRAL_DB_LOCK is not None:
-        with CENTRAL_DB_LOCK:
-            WORKER_DB_CONN.execute('BEGIN TRANSACTION')
-            WORKER_DB_CONN.executemany(
-                '''INSERT INTO simulation_results
-                   (start_date, end_date, allocation, withdrawal_rate, retirement_period,
-                    final_value_target, final_value, success, months_lasted, years_lasted,
-                    min_value, max_value, total_withdrawn)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                rows
-            )
-            WORKER_DB_CONN.execute('COMMIT')
+    WORKER_DB_CONN.insert_simulation_results(result_records, CENTRAL_DB_LOCK)
 
 
 def worker_simulation(task):

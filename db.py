@@ -139,6 +139,95 @@ class DatabaseBackend:
             self.execute('CREATE INDEX IF NOT EXISTS idx_paths_allocation ON simulation_paths(allocation)')
             self.execute('CREATE INDEX IF NOT EXISTS idx_paths_withdrawal_rate ON simulation_paths(withdrawal_rate)')
 
+    def insert_path_rows(self, start_date, allocation, withdrawal_rate, path_data, db_lock=None):
+        """Insert simulation path data into the database."""
+        allocation_str = f"{allocation[0]}/{allocation[1]}"
+        start_date_str = start_date.strftime('%Y-%m-%d') if hasattr(start_date, 'strftime') else str(start_date)
+        rows = []
+        for month_index, date in enumerate(path_data['dates'], start=1):
+            date_str = date.strftime('%Y-%m-%d') if hasattr(date, 'strftime') else str(date)
+            rows.append(
+                (start_date_str,
+                 allocation_str,
+                 float(withdrawal_rate),
+                 int(month_index),
+                 date_str,
+                 float(path_data['stocks'][month_index - 1]),
+                 float(path_data['bonds'][month_index - 1]),
+                 float(path_data['total'][month_index - 1]),
+                 float(path_data['withdrawals'][month_index - 1]),
+                 float(path_data['min_values'][month_index - 1]),
+                 float(path_data['max_values'][month_index - 1]))
+            )
+
+        if rows:
+            if db_lock is not None:
+                with db_lock:
+                    self.execute('BEGIN TRANSACTION')
+                    self.executemany(
+                        '''INSERT INTO simulation_paths
+                           (start_date, allocation, withdrawal_rate, month, date, stocks, bonds, total, withdrawal, min_value, max_value)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                        rows
+                    )
+                    self.execute('COMMIT')
+            else:
+                self.execute('BEGIN TRANSACTION')
+                self.executemany(
+                    '''INSERT INTO simulation_paths
+                       (start_date, allocation, withdrawal_rate, month, date, stocks, bonds, total, withdrawal, min_value, max_value)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                    rows
+                )
+                self.execute('COMMIT')
+
+    def insert_simulation_results(self, result_records, db_lock=None):
+        """Insert simulation results into the database."""
+        if not result_records:
+            return
+
+        rows = []
+        for record in result_records:
+            rows.append(
+                (record['start_date'].strftime('%Y-%m-%d'),
+                 record['end_date'].strftime('%Y-%m-%d'),
+                 str(record['allocation']),
+                 float(record['withdrawal_rate']),
+                 int(record['retirement_period']),
+                 float(record['final_value_target']),
+                 float(record['final_value']),
+                 bool(record['success']),
+                 int(record['months_lasted']),
+                 float(record['years_lasted']),
+                 float(record['min_value']),
+                 float(record['max_value']),
+                 float(record['total_withdrawn']))
+            )
+
+        if db_lock is not None:
+            with db_lock:
+                self.execute('BEGIN TRANSACTION')
+                self.executemany(
+                    '''INSERT INTO simulation_results
+                       (start_date, end_date, allocation, withdrawal_rate, retirement_period,
+                        final_value_target, final_value, success, months_lasted, years_lasted,
+                        min_value, max_value, total_withdrawn)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                    rows
+                )
+                self.execute('COMMIT')
+        else:
+            self.execute('BEGIN TRANSACTION')
+            self.executemany(
+                '''INSERT INTO simulation_results
+                   (start_date, end_date, allocation, withdrawal_rate, retirement_period,
+                    final_value_target, final_value, success, months_lasted, years_lasted,
+                    min_value, max_value, total_withdrawn)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                rows
+            )
+            self.execute('COMMIT')
+
 
 class SQLiteBackend(DatabaseBackend):
     def __init__(self, path):
